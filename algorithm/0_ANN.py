@@ -2,6 +2,7 @@
 import tensorflow as tf
 import numpy as np
 import datetime
+import os
 
 # 파라미터 설정하기
 algorithm = 'ANN'
@@ -33,38 +34,41 @@ x_test = boston_housing[1][0]
 y_test = np.reshape(boston_housing[1][1],(-1,1))
 
 # 네트워크 구조 정의, 손실 함수 정의 및 학습 수행 
-class Model():
+class Model(tf.keras.models.Model):
     def __init__(self):
-
-        # 입력 및 실제값 
-        self.x_input  = tf.placeholder(tf.float32, shape = [None, data_size])
-        self.y_target = tf.placeholder(tf.float32, shape=[None, 1])
-
         # 네트워크
-        self.fc1 = tf.layers.dense(self.x_input, 128, activation=tf.nn.relu)
-        self.fc2 = tf.layers.dense(self.fc1, 128, activation=tf.nn.relu)
-        self.fc3 = tf.layers.dense(self.fc2, 128, activation=tf.nn.relu)
-        self.out = tf.layers.dense(self.fc3, 1)
+        self.x_input = tf.keras.layers.Input(shape=[data_size, ])
+        self.fc1 = tf.keras.layers.Dense(128, activation="relu")(self.x_input)
+        self.fc2 = tf.keras.layers.Dense(128, activation="relu")(self.fc1)
+        self.fc3 = tf.keras.layers.Dense(128, activation="relu")(self.fc2)
+        self.out = tf.keras.layers.Dense(1)(self.fc3)
+        super().__init__(inputs=self.x_input, outputs=self.out)
+        # 옵티마이
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate)
 
-        # 손실 함수 계산 및 학습 수행
-        self.loss = tf.losses.mean_squared_error(labels=self.y_target, predictions=self.out)
-        self.UpdateModel = tf.train.AdamOptimizer(learning_rate).minimize(self.loss)
+    #손실 함
+    @tf.function
+    def loss(self, x_input, y_target):
+        return tf.losses.mean_squared_error(y_target, self(x_input))
+    
+    @tf.function
+    def UpdateModel(self, x_input, y_target):
+        with tf.GradientTape() as tape:
+            loss = self.loss(x_input, y_target)
+        grads = tape.gradient(loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+        return loss
 
 # 인공 신경망 학습을 위한 다양한 함수들 
 class ANN():
     def __init__(self):
         self.model = Model()
-        # Tensorflow 세션 초기화
-        self.sess = tf.Session()
-        self.init = tf.global_variables_initializer()
-        self.sess.run(self.init)
 
-        self.Saver = tf.train.Saver()
-        self.Train_Summary, self.Val_Summary, self.Merge = self.Make_Summary()
+        self.Train_Summary, self.Val_Summary, self.Train_metric, self.Val_metric = self.Make_Summary()
 
         # 모델 불러오기
-        if load_model == True:
-            self.Saver.restore(self.sess, load_path)
+        if (load_model == True and os.path.exists(save_path + "/model/model.h5")):
+            self.model.load_weights(save_path + "/model/model.h5")
 
     # 모델 학습
     def train_model(self, data_x, data_y, batch_idx):
@@ -77,36 +81,34 @@ class ANN():
             batch_x = data_x[batch_idx : len_data, :]
             batch_y = data_y[batch_idx : len_data, :]
 
-        _, loss, output = self.sess.run([self.model.UpdateModel, self.model.loss, self.model.out],
-                                                feed_dict={self.model.x_input: batch_x, 
-                                                            self.model.y_target: batch_y})
-        return loss
+        loss = self.model.UpdateModel(batch_x, batch_y)
+        return loss.numpy().mean()
 
     # 알고리즘 성능 테스트
     def test_model(self, data_x, data_y):
-        loss, output = self.sess.run([self.model.loss, self.model.out],
-                                      feed_dict={self.model.x_input: data_x, 
-                                                 self.model.y_target: data_y})
-        return loss
+        loss = self.model.loss(data_x, data_y)
+        return loss.numpy().mean()
 
     # 모델 저장
     def save_model(self):
-        self.Saver.save(self.sess, save_path + "/model/model.ckpt")
+        self.model.save(save_path + "/model/model.h5")
 
     # 텐서보드에 손실 함수값 및 정확도 저장
     def Make_Summary(self):
-        self.summary_loss = tf.placeholder(dtype=tf.float32)
-        tf.summary.scalar("loss", self.summary_loss)
-        Train_Summary = tf.summary.FileWriter(logdir=save_path+"/train")
-        Val_Summary = tf.summary.FileWriter(logdir=save_path+"/val")
-        Merge = tf.summary.merge_all()
-        return Train_Summary, Val_Summary, Merge
+        Train_Summary = tf.summary.create_file_writer(logdir=save_path+"/train")
+        Val_Summary = tf.summary.create_file_writer(logdir=save_path+"/val")
+        Train_metric = tf.keras.metrics.Mean("Train_loss", dtype=tf.float32)
+        Val_metric = tf.keras.metrics.Mean("Val_loss", dtype=tf.float32)
+        return Train_Summary, Val_Summary, Train_metric, Val_metric
 
     def Write_Summray(self, train_loss, val_loss, batch):
-        self.Train_Summary.add_summary(
-            self.sess.run(self.Merge, feed_dict={self.summary_loss: train_loss}), batch)
-        self.Val_Summary.add_summary(
-            self.sess.run(self.Merge, feed_dict={self.summary_loss: val_loss}), batch)
+        self.Train_metric(train_loss)
+        self.Val_metric(val_loss)
+
+        with self.Train_Summary.as_default():
+            tf.summary.scalar("loss", self.Train_metric.result(), step=batch)
+        with self.Val_Summary.as_default():
+            tf.summary.scalar("loss", self.Val_metric.result(), step=batch)
 
 if __name__ == '__main__':
     ann = ANN()
