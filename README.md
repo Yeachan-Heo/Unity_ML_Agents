@@ -1,7 +1,9 @@
 # RLKorea Unity ML-agents 튜토리얼 프로젝트(TF2.1 포팅 버)
 
 # 진행 상황
-0_ANN.py 포팅 완료. 작동 확인 완료(텐서보드 작동 확인 X)
+0_ANN.py 포팅 완료. 작동 확인 완료
+0_CNN.py 포팅 완료, 작동 확인 완료
+1_DQN.py 포팅 완료, 작동 확인 완료
 
 # 오리지널 리포지토리
 https://github.com/reinforcement-learning-kr/Unity_ML_Agents/  

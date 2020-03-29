@@ -2,6 +2,7 @@
 import tensorflow as tf
 import numpy as np
 import datetime
+import os
 
 # 파라미터 설정하기
 algorithm = 'CNN'
@@ -20,7 +21,7 @@ learning_rate = 0.00025
 date_time = datetime.datetime.now().strftime("%Y%m%d-%H-%M-%S")
 
 save_path = "../saved_models/" + date_time + "_" + algorithm
-load_path = "../saved_models/20190312-11-12-35_CNN/model/model" 
+load_path = f"../saved_models/20190312-11-12-35_CNN/model/model"
 
 load_model = False
 
@@ -51,30 +52,40 @@ y_train_onehot, y_val_onehot = y_train_onehot[:len(y_train)*9//10], y_train_oneh
 x_val = np.reshape(x_val, [-1, img_size, img_size, 1])
 
 # 네트워크 구조 정의, 손실 함수 정의 및 학습 수행 
-class Model():
+class Model(tf.keras.models.Model):
     def __init__(self):
 
         # 입력 및 실제값 
-        self.x_input  = tf.placeholder(tf.float32, shape = [None, img_size, img_size, 1])
+        self.x_input  = tf.keras.layers.Input(shape = [img_size, img_size, 1])
         self.x_normalize = (self.x_input - (255.0/2)) / (255.0/2)
 
-        self.y_target = tf.placeholder(tf.float32, shape=[None, num_label])
-
         # 네트워크 (Conv-> 2, 은닉층 -> 1)
-        self.conv1 = tf.layers.conv2d(self.x_normalize, filters=32, activation=tf.nn.relu, 
-                                      kernel_size=[3,3], strides=[2,2], padding="same")
-        self.conv2 = tf.layers.conv2d(self.conv1, filters=64, activation=tf.nn.relu, 
-                                      kernel_size=[3,3], strides=[2,2], padding="same")
+        self.conv1 = tf.keras.layers.Conv2D(filters=32, activation=tf.nn.relu,
+                                      kernel_size=[3,3], strides=[2,2], padding="same")(self.x_normalize)
+        self.conv2 = tf.keras.layers.Conv2D(filters=64, activation=tf.nn.relu,
+                                      kernel_size=[3,3], strides=[2,2], padding="same")(self.conv1)
 
-        self.flat = tf.layers.flatten(self.conv2)
+        self.flat = tf.keras.layers.Flatten()(self.conv2)
 
-        self.fc1 = tf.layers.dense(self.flat, 128, activation=tf.nn.relu)
-        self.out = tf.layers.dense(self.fc1, num_label)
+        self.fc1 = tf.keras.layers.Dense(128, activation=tf.nn.relu)(self.flat)
+        self.out = tf.keras.layers.Dense(num_label)(self.fc1)
 
-        # 손실 함수 계산 및 학습 수행
-        self.loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=self.y_target, 
-                                                                              logits=self.out))
-        self.UpdateModel = tf.train.AdamOptimizer(learning_rate).minimize(self.loss)
+        super().__init__(inputs=self.x_input, outputs=self.out)
+        # 옵티마이
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate)
+
+    @tf.function
+    def loss(self, prediction, y_target):
+        return tf.reduce_mean(tf.keras.losses.categorical_crossentropy(y_target, prediction))
+
+    @tf.function
+    def UpdateModel(self, x_input, y_target):
+        with tf.GradientTape() as tape:
+            prediction = self(x_input)
+            loss = self.loss(prediction, y_target)
+        grad = tape.gradient(loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grad, self.trainable_weights))
+        return loss, prediction
 
 # CNN 학습을 위한 다양한 함수들 
 class CNN():
@@ -82,18 +93,12 @@ class CNN():
         
         self.model = Model()
 
-        # Tensorflow 세션 초기화
-        self.sess = tf.Session()
-        self.init = tf.global_variables_initializer()
-        self.sess.run(self.init)
-
-        self.Saver = tf.train.Saver()
-
-        self.Train_Summary, self.Val_Summary, self.Merge = self.Make_Summary()
+        (self.Train_Summary, self.Val_Summary, self.Train_metric_loss,
+        self.Val_metric_loss, self.Train_metric_acc, self.Val_metric_acc) = self.Make_Summary()
 
         # 모델 불러오기
-        if load_model == True:
-            self.Saver.restore(self.sess, load_path)
+        if (load_model and os.path.exists(load_path)):
+            self.model.load_weights(load_path)
 
     # 모델 학습
     def train_model(self, data_x, data_y, batch_idx):
@@ -106,9 +111,10 @@ class CNN():
             batch_x = data_x[batch_idx : len_data, :, :, :]
             batch_y = data_y[batch_idx : len_data, :]
 
-        _, loss, output = self.sess.run([self.model.UpdateModel, self.model.loss, self.model.out],
-                                         feed_dict={self.model.x_input: batch_x, 
-                                                    self.model.y_target: batch_y})
+        batch_x = batch_x.astype(np.float32)
+        batch_y = batch_y.astype(np.float32)
+
+        loss, output = self.model.UpdateModel(batch_x, batch_y)
 
         accuracy = self.get_accuracy(output, batch_y)
 
@@ -117,13 +123,14 @@ class CNN():
 
     # 알고리즘 성능 테스트
     def test_model(self, data_x, data_y):
-        loss, output = self.sess.run([self.model.loss, self.model.out],
-                                      feed_dict={self.model.x_input: data_x, 
-                                                 self.model.y_target: data_y})
+        data_x, data_y = data_x.astype(np.float32), data_y.astype(np.float32)
+        output = self.model(data_x)
+
+        loss = self.model.loss(output, data_y)
         
         accuracy = self.get_accuracy(output, data_y)
 
-        return loss, accuracy     
+        return loss, accuracy
 
     # 정확도 계산
     def get_accuracy(self, pred, label):
@@ -138,29 +145,32 @@ class CNN():
 
     # 모델 저장
     def save_model(self):
-        self.Saver.save(self.sess, save_path + "/model/model")
+        self.model.save_weights(save_path + "/model/model")
 
     # 텐서보드에 손실 함수값 및 정확도 저장
     def Make_Summary(self):
-        self.summary_loss     = tf.placeholder(dtype=tf.float32)
-        self.summary_acc      = tf.placeholder(dtype=tf.float32)
-
-        tf.summary.scalar("Loss", self.summary_loss)
-        tf.summary.scalar("Accuracy", self.summary_acc)
-
-        Train_Summary = tf.summary.FileWriter(logdir=save_path+"/train")
-        Val_Summary = tf.summary.FileWriter(logdir=save_path+"/val")
-        Merge = tf.summary.merge_all()
-
-        return Train_Summary, Val_Summary, Merge
+        Train_Summary = tf.summary.create_file_writer(logdir=save_path + "/train")
+        Val_Summary = tf.summary.create_file_writer(logdir=save_path + "/val")
+        Train_metric_loss = tf.keras.metrics.Mean("Train_loss", dtype=tf.float32)
+        Val_metric_loss = tf.keras.metrics.Mean("Val_loss", dtype=tf.float32)
+        Train_metric_acc = tf.keras.metrics.Mean("Train_acc")
+        Val_metric_acc = tf.keras.metrics.Mean("Val_acc")
+        return Train_Summary, Val_Summary, \
+               Train_metric_loss, Val_metric_loss, \
+               Train_metric_acc, Val_metric_acc
 
     def Write_Summray(self, accuracy, loss, accuracy_val, loss_val, batch):
-        self.Train_Summary.add_summary(
-            self.sess.run(self.Merge, feed_dict={self.summary_loss: loss, 
-                                                 self.summary_acc: accuracy}), batch)
-        self.Val_Summary.add_summary(
-            self.sess.run(self.Merge, feed_dict={self.summary_loss: loss_val,
-                                                 self.summary_acc: accuracy_val}), batch)
+        self.Train_metric_loss(loss)
+        self.Train_metric_acc(accuracy)
+        self.Val_metric_loss(loss_val)
+        self.Val_metric_acc(accuracy_val)
+        with self.Train_Summary.as_default():
+            tf.summary.scalar("loss", self.Train_metric_loss.result(), batch)
+            tf.summary.scalar("accuracy", self.Train_metric_acc.result(), batch)
+        with self.Val_Summary.as_default():
+            tf.summary.scalar("loss", self.Val_metric_loss.result(), batch)
+            tf.summary.scalar("accuracy", self.Val_metric_acc.result(), batch)
+
 
 if __name__ == '__main__':
 

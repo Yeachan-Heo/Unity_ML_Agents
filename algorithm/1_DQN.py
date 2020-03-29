@@ -5,7 +5,7 @@ import datetime
 import time
 import tensorflow as tf
 from collections import deque
-from mlagents.envs import UnityEnvironment
+from gym_unity.envs import UnityEnvironment
 
 # DQN을 위한 파라미터 값 세팅 
 state_size = [84, 84, 3]
@@ -38,44 +38,58 @@ date_time = datetime.datetime.now().strftime("%Y%m%d-%H-%M-%S")
 
 # 유니티 환경 경로 
 game = "Sokoban"
-env_name = "../env/" + game + "/Windows/" + game
+env_name = "../env/" + game + "/Mac/" + game
 
 # 모델 저장 및 불러오기 경로
 save_path = "../saved_models/" + game + "/" + date_time + "_DQN"
 load_path = "../saved_models/" + game + "/20190828-10-42-45_DQN/model/model"
 
 # Model 클래스 -> 함성곱 신경망 정의 및 손실함수 설정, 네트워크 최적화 알고리즘 결정
-class Model():
+class Model(tf.keras.models.Model):
     def __init__(self, model_name):
-        self.input = tf.placeholder(shape=[None, state_size[0], state_size[1], 
+        self.state_input = tf.keras.layers.Input(shape=[state_size[0], state_size[1],
                                            state_size[2]], dtype=tf.float32)
         # 입력을 -1 ~ 1까지 값을 가지도록 정규화
-        self.input_normalize = (self.input - (255.0 / 2)) / (255.0 / 2)
+        self.input_normalize = (self.state_input - (255.0 / 2)) / (255.0 / 2)
 
         # CNN Network 구축 -> 3개의 Convolutional layer와 2개의 Fully connected layer
-        with tf.variable_scope(name_or_scope=model_name):
-            self.conv1 = tf.layers.conv2d(inputs=self.input_normalize, filters=32, 
+        self.conv1 = tf.keras.layers.Conv2D(filters=32,
                                           activation=tf.nn.relu, kernel_size=[8,8], 
-                                          strides=[4,4], padding="SAME")
-            self.conv2 = tf.layers.conv2d(inputs=self.conv1, filters=64, 
+                                          strides=[4,4], padding="SAME")(self.input_normalize)
+        self.conv2 = tf.keras.layers.Conv2D(filters=64,
                                           activation=tf.nn.relu, kernel_size=[4,4],
-                                          strides=[2,2],padding="SAME")
-            self.conv3 = tf.layers.conv2d(inputs=self.conv2, filters=64, 
+                                          strides=[2,2],padding="SAME")(self.conv1)
+        self.conv3 = tf.keras.layers.Conv2D(filters=64,
                                           activation=tf.nn.relu, kernel_size=[3,3],
-                                          strides=[1,1],padding="SAME")
+                                          strides=[1,1],padding="SAME")(self.conv2)
  
-            self.flat = tf.layers.flatten(self.conv3)
+        self.flat = tf.keras.layers.Flatten()(self.conv3)
 
-            self.fc1 = tf.layers.dense(self.flat,512,activation=tf.nn.relu)
-            self.Q_Out = tf.layers.dense(self.fc1, action_size, activation=None)
-        self.predict = tf.argmax(self.Q_Out, 1)
-
-        self.target_Q = tf.placeholder(shape=[None, action_size], dtype=tf.float32)
+        self.fc1 = tf.keras.layers.Dense(512,activation=tf.nn.relu)(self.flat)
+        self.Q_Out = tf.keras.layers.Dense(action_size, activation=None)(self.fc1)
+        super().__init__(inputs=self.state_input, outputs=self.Q_Out)
 
         # 손실함수 값 계산 및 네트워크 학습 수행 
-        self.loss = tf.losses.huber_loss(self.target_Q, self.Q_Out)
-        self.UpdateModel = tf.train.AdamOptimizer(learning_rate).minimize(self.loss)
-        self.trainable_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, model_name)
+        self.loss = tf.keras.losses.Huber()
+        self.optimizer = tf.optimizers.Adam(learning_rate)
+
+    def predict(self,
+              x,
+              batch_size=None,
+              verbose=0,
+              steps=None,
+              callbacks=None,
+              max_queue_size=10,
+              workers=1,
+              use_multiprocessing=False):
+        return tf.argmax(self(x), 1)
+
+    def UpdateModel(self, state_input, target_q):
+        with tf.GradientTape() as tape:
+            loss = self.loss(target_q, self(state_input))
+        grad = tape.gradient(loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grad, self.trainable_weights))
+        return loss
 
 # DQNAgent 클래스 -> DQN 알고리즘을 위한 다양한 함수 정의 
 class DQNAgent():
@@ -86,20 +100,15 @@ class DQNAgent():
         self.target_model = Model("target")
 
         self.memory = deque(maxlen=mem_maxlen)
-   
-        self.sess = tf.Session()
-        self.init = tf.global_variables_initializer()
-        self.sess.run(self.init)
 
         self.epsilon = epsilon_init
 
-        self.Saver = tf.train.Saver()
-        self.Summary, self.Merge = self.Make_Summary()
+        self.Summary, self.metrics_loss, self.metrics_reward = self.Make_Summary()
 
         self.update_target()
 
         if load_model == True:
-            self.Saver.restore(self.sess, load_path)
+            self.model.load_weights(save_path)
 
     # Epsilon greedy 기법에 따라 행동 결정
     def get_action(self, state):
@@ -108,8 +117,8 @@ class DQNAgent():
             return np.random.randint(0, action_size)
         else:
             # 네트워크 연산에 따라 행동 결정
-            predict = self.sess.run(self.model.predict, feed_dict={self.model.input: state})
-            return np.asscalar(predict)
+            predict = self.model.predict(state).numpy()
+            return predict.item()
 
     # 리플레이 메모리에 데이터 추가 (상태, 행동, 보상, 다음 상태, 게임 종료 여부)
     def append_sample(self, state, action, reward, next_state, done):
@@ -117,7 +126,7 @@ class DQNAgent():
 
     # 네트워크 모델 저장 
     def save_model(self):
-        self.Saver.save(self.sess, save_path + "/model/model")
+        self.model.save(save_path + "/model/model")
 
     # 학습 수행 
     def train_model(self, done):
@@ -143,9 +152,8 @@ class DQNAgent():
             dones.append(mini_batch[i][4])
 
         # 타겟값 계산 
-        target = self.sess.run(self.model.Q_Out, feed_dict={self.model.input: states})
-        target_val = self.sess.run(self.target_model.Q_Out, 
-                                   feed_dict={self.target_model.input: next_states})
+        target = self.model(states).numpy()
+        target_val = self.target_model(next_states).numpy()
 
         for i in range(batch_size):
             if dones[i]:
@@ -154,31 +162,26 @@ class DQNAgent():
                 target[i][actions[i]] = rewards[i] + discount_factor * np.amax(target_val[i])
 
         # 학습 수행 및 손실함수 값 계산 
-        _, loss = self.sess.run([self.model.UpdateModel, self.model.loss],
-                                feed_dict={self.model.input: states, 
-                                           self.model.target_Q: target})
-        return loss
+        loss = self.model.UpdateModel(states, target)
+        return loss.numpy().mean()
 
     # 타겟 네트워크 업데이트 
     def update_target(self):
-        for i in range(len(self.model.trainable_var)):
-            self.sess.run(self.target_model.trainable_var[i].assign(self.model.trainable_var[i]))
+        self.target_model.set_weights(self.model.get_weights())
 
     # 텐서보드에 기록할 값 설정 및 데이터 기록 
     def Make_Summary(self):
-        self.summary_loss = tf.placeholder(dtype=tf.float32)
-        self.summary_reward = tf.placeholder(dtype=tf.float32)
-        tf.summary.scalar("loss", self.summary_loss)
-        tf.summary.scalar("reward", self.summary_reward)
-        Summary = tf.summary.FileWriter(logdir=save_path, graph=self.sess.graph)
-        Merge = tf.summary.merge_all()
-
-        return Summary, Merge
+        metrics_loss = tf.keras.metrics.Mean("loss", dtype=tf.float32)
+        metrics_reward = tf.keras.metrics.Mean("reward", dtype=tf.float32)
+        Summary = tf.summary.create_file_writer(save_path)
+        return Summary, metrics_loss, metrics_reward
     
     def Write_Summray(self, reward, loss, episode):
-        self.Summary.add_summary(
-            self.sess.run(self.Merge, feed_dict={self.summary_loss: loss, 
-                                                 self.summary_reward: reward}), episode)
+        self.metrics_loss(loss)
+        self.metrics_reward(reward)
+        with self.Summary.as_default():
+            tf.summary.scalar("loss", self.metrics_loss.result())
+            tf.summary.scalar("reward", self.metrics_reward.result())
 
 # Main 함수 -> 전체적으로 DQN 알고리즘을 진행 
 if __name__ == '__main__':

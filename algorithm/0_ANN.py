@@ -48,13 +48,13 @@ class Model(tf.keras.models.Model):
 
     #손실 함
     @tf.function
-    def loss(self, x_input, y_target):
-        return tf.losses.mean_squared_error(y_target, self(x_input))
+    def loss(self, prediction, y_target):
+        return tf.losses.mean_squared_error(y_target, prediction)
     
     @tf.function
     def UpdateModel(self, x_input, y_target):
         with tf.GradientTape() as tape:
-            loss = self.loss(x_input, y_target)
+            loss = self.loss(self(x_input), y_target)
         grads = tape.gradient(loss, self.trainable_weights)
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
         return loss
@@ -86,7 +86,7 @@ class ANN():
 
     # 알고리즘 성능 테스트
     def test_model(self, data_x, data_y):
-        loss = self.model.loss(data_x, data_y)
+        loss = self.model.loss(self.model(data_x), data_y)
         return loss.numpy().mean()
 
     # 모델 저장
